@@ -1,7 +1,6 @@
-
-
 import streamlit as st
 import pandas as pd
+import json
 from src.ai.question_generator import QuestionGenerator
 from src.ai.tutor_agent import TutorAgent
 from src.components.query_runner import QueryRunner
@@ -9,7 +8,7 @@ from database.db_connection import get_db_connection
 from database.db_setup import initialize_database
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="AI SQL Tutor", page_icon="🎓", layout="wide")
+st.set_page_config(page_title="AI SQL Tutor Pro", page_icon="🎓", layout="wide")
 
 # --- INITIALIZE COMPONENTS ---
 @st.cache_resource
@@ -20,22 +19,26 @@ que_gen, tutor_agent, db_runner = load_components()
 
 # --- SESSION STATE MANAGEMENT ---
 if "mode" not in st.session_state:
-    st.session_state.mode = "setup" # setup, lesson, or practice
-    st.session_state.lesson_content = ""
-    st.session_state.current_q = None
-    st.session_state.expected_sql = None
-    st.session_state.feedback = ""
-    st.session_state.attempts = 0
+    st.session_state.update({
+        "mode": "setup",
+        "question_buffer": [],
+        "current_idx": 0,
+        "lesson_content": "",
+        "current_q": None,
+        "expected_sql": None,
+        "feedback": "",
+        "attempts": 0,
+        "last_result": None
+    })
 
 # --- SIDEBAR: CONFIGURATION ---
 with st.sidebar:
     st.title("📂 Learning Path")
     
-    # 1. Data Selection
     data_choice = st.radio("Data Source:", ["In-built Datasets", "Upload Custom CSVs"])
     
     if data_choice == "Upload Custom CSVs":
-        uploaded_files = st.file_uploader("Upload 1 or 2 CSVs", type="csv", accept_multiple_files=True)
+        uploaded_files = st.file_uploader("Upload CSVs", type="csv", accept_multiple_files=True)
         if uploaded_files:
             conn = get_db_connection()
             for f in uploaded_files:
@@ -51,22 +54,31 @@ with st.sidebar:
 
     st.divider()
     
-    # 2. Learning Parameters
     concept = st.selectbox("Topic", ["Basic SELECT", "Joins", "Aggregates (GROUP BY)", "Subqueries"])
     difficulty = st.select_slider("Difficulty", options=["Beginner", "Intermediate", "Advanced"])
 
-    if st.button("🚀 Start Learning Session", use_container_width=True):
-        with st.spinner("Generating your lesson..."):
+    if st.button("🚀 Start 10-Question Session", use_container_width=True):
+        with st.spinner("Generating 10 custom challenges (Optimizing API usage...)..."):
+            # 1. Generate Lesson Explanation
             st.session_state.lesson_content = que_gen.generate_lesson(concept, difficulty)
-            raw_q = que_gen.generate_question(difficulty, concept=concept)
+            
+            # 2. Bulk Generate 10 Questions in 1 API Call
+            raw_json = que_gen.generate_bulk_questions(difficulty, concept, count=10)
             try:
-                st.session_state.current_q = raw_q.split("Expected_SQL:")[0].replace("Question:", "").strip()
-                st.session_state.expected_sql = raw_q.split("Expected_SQL:")[1].strip()
+                questions = json.loads(raw_json)
+                st.session_state.question_buffer = questions
+                st.session_state.current_idx = 0
+                
+                # Load first question from buffer
+                first = questions[0]
+                st.session_state.current_q = first["question"]
+                st.session_state.expected_sql = first["expected_sql"]
+                
                 st.session_state.mode = "lesson"
                 st.session_state.feedback = ""
                 st.session_state.attempts = 0
-            except:
-                st.error("AI formatting error. Try again!")
+            except Exception as e:
+                st.error("Failed to parse bulk questions. Resetting...")
 
 # --- MAIN UI ---
 st.title("🎓 Personal SQL Tutor")
@@ -84,7 +96,11 @@ elif st.session_state.mode == "lesson":
         st.rerun()
 
 elif st.session_state.mode == "practice":
-    st.markdown(f"### ✍️ Practice: {concept}")
+    curr_i = st.session_state.current_idx
+    total_q = len(st.session_state.question_buffer)
+    
+    st.subheader(f"Challenge {curr_i + 1} of {total_q}")
+    st.progress((curr_i + 1) / total_q)
 
     # --- SCHEMA & DATA PREVIEW ---
     with st.expander("🔍 View Database Schema & Data Samples", expanded=True):
@@ -97,62 +113,65 @@ elif st.session_state.mode == "practice":
                 if info.get("sample"):
                     sample_df = pd.DataFrame(info["sample"], columns=info["columns"])
                     st.dataframe(sample_df, use_container_width=True, hide_index=True)
-                else:
-                    st.caption(f"Columns: {', '.join(info['columns'])}")
-                    st.warning("Table is currently empty.")
                 st.divider()
 
-    # --- CHALLENGE DISPLAY ---
     st.info(f"**Task:** {st.session_state.current_q}")
-    user_sql = st.text_area("Write your SQL Query:", height=150, placeholder="SELECT ... FROM ...", key="sql_input_area")
+    user_sql = st.text_area("Write your SQL Query:", height=150, key=f"sql_input_{curr_i}")
 
     col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 3])
     
     with col_btn1:
-        if st.button("🚀 Submit Answer", use_container_width=True):
-            run_res = db_runner.run_query(user_sql)
-            check_res = tutor_agent.validate_answer(
-                st.session_state.current_q, 
-                st.session_state.expected_sql, 
-                user_sql, 
-                st.session_state.attempts
-            )
-            st.session_state.feedback = check_res["feedback"]
-            st.session_state.attempts = check_res["attempts_count"]
-
-            if run_res["success"]:
-                st.success("Query executed successfully!")
-                st.dataframe(run_res["result"], use_container_width=True)
-            else:
-                st.error(f"Execution Error: {run_res['error']}")
-
-            if "CORRECT" in st.session_state.feedback.upper():
+        if st.button("🚀 Submit & Validate", use_container_width=True):
+            # 1. LOCAL VALIDATION (Instant & Free)
+            res = db_runner.validate_locally(user_sql, st.session_state.expected_sql)
+            st.session_state.last_result = res
+            
+            if res["is_correct"]:
+                st.session_state.feedback = "CORRECT"
                 st.balloons()
-                st.success(st.session_state.feedback)
             else:
-                st.warning(f"🤖 AI Tutor: {st.session_state.feedback}")
-    
+                # 2. CALL AI ONLY ON FAILURE (For pedagogical hint)
+                with st.spinner("AI Tutor is analyzing your mistake..."):
+                    check_res = tutor_agent.validate_answer(
+                        st.session_state.current_q, 
+                        st.session_state.expected_sql, 
+                        user_sql, 
+                        st.session_state.attempts,
+                        is_locally_correct=False
+                    )
+                    st.session_state.feedback = check_res["feedback"]
+                    st.session_state.attempts = check_res["attempts_count"]
+
+    # --- DISPLAY RESULTS ---
+    if st.session_state.last_result:
+        res = st.session_state.last_result
+        if res["error"]:
+            st.error(f"❌ SQL Error: {res['error']}")
+        elif res["result"] is not None:
+            st.success("Query executed successfully!")
+            st.dataframe(res["result"], use_container_width=True)
+
+    if st.session_state.feedback == "CORRECT":
+        st.success("✅ Perfect! Your result matches the expected output.")
+        with col_btn3:
+            if st.button("➕ Practice Next Question", type="primary"):
+                if curr_i + 1 < total_q:
+                    next_q = st.session_state.question_buffer[curr_i + 1]
+                    st.session_state.update({
+                        "current_idx": curr_i + 1,
+                        "current_q": next_q["question"],
+                        "expected_sql": next_q["expected_sql"],
+                        "feedback": "",
+                        "last_result": None,
+                        "attempts": 0
+                    })
+                    st.rerun()
+                else:
+                    st.success("🏆 All 10 challenges complete! Reset in the sidebar for more.")
+    elif st.session_state.feedback:
+        st.warning(f"🤖 AI Tutor Hint: {st.session_state.feedback}")
+
     with col_btn2:
         if st.button("⬅️ Back to Lesson", use_container_width=True):
             st.session_state.mode = "lesson"
             st.rerun()
-
-    # --- FIXED PRACTICE MORE LOGIC ---
-    if st.session_state.feedback and "CORRECT" in st.session_state.feedback.upper():
-        with col_btn3:
-            if st.button("🔄 Practice More", type="primary"):
-                with st.spinner("Generating another challenge..."):
-                    # Call generation
-                    new_raw_q = que_gen.generate_question(difficulty, concept=concept)
-                    
-                    # Robust Parsing
-                    if "Expected_SQL:" in new_raw_q:
-                        parts = new_raw_q.split("Expected_SQL:")
-                        st.session_state.current_q = parts[0].replace("Question:", "").strip()
-                        st.session_state.expected_sql = parts[1].strip()
-                        # Reset states for the new question
-                        st.session_state.feedback = ""
-                        st.session_state.attempts = 0
-                        st.rerun()
-                    else:
-                        st.error("The AI gave a non-standard response. Please click 'Practice More' again.")

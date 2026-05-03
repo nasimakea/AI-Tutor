@@ -84,3 +84,32 @@ class QueryRunner:
 
         finally:
             conn.close()
+
+    def validate_locally(self, user_sql: str, expected_sql: str):
+        """
+        Validates user SQL against expected SQL by comparing actual result sets.
+        This avoids calling the AI API for every single attempt.
+        """
+        conn = get_db_connection()
+        try:
+            # Execute both queries
+            user_df = pd.read_sql_query(user_sql, conn)
+            expected_df = pd.read_sql_query(expected_sql, conn)
+
+            # Compare Dataframes (ignores row order to be more flexible for learners)
+            # Use sort_values if you want to be strict, but .equals() is good for exact matches
+            is_correct = user_df.equals(expected_df)
+
+            return {
+                "is_correct": is_correct,
+                "result": user_df,
+                "error": None
+            }
+        except Exception as e:
+            return {
+                "is_correct": False,
+                "result": None,
+                "error": str(e)
+            }
+        finally:
+            conn.close()

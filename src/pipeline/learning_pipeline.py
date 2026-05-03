@@ -1,38 +1,64 @@
 from src.ai.question_generator import QuestionGenerator
-from src.ai.answer_checker import AnswerChecker
-from src.components.hint_generator import HintGenerator
+from src.ai.tutor_agent import TutorAgent
 from src.components.query_runner import QueryRunner
+import json
 
 class LearningPipeline:
     def __init__(self):
         self.question_gen = QuestionGenerator()
-        self.checker = AnswerChecker()
-        self.hinter = HintGenerator()
+        self.tutor_agent = TutorAgent()
         self.runner = QueryRunner()
 
-    def new_session(self, difficulty):
-        raw_q = self.question_gen.generate_question(difficulty)
-        # Basic parsing
-        parts = raw_q.split("Expected_SQL:")
-        return {
-            "question": parts[0].replace("Question:", "").strip(),
-            "expected_sql": parts[1].strip() if len(parts) > 1 else ""
-        }
+    def start_bulk_session(self, difficulty, concept, count=10):
+        """
+        Optimized: Fetches 10 questions in a single API call.
+        Returns a list of question objects.
+        """
+        # 1. Generate lesson content
+        lesson = self.question_gen.generate_lesson(concept, difficulty)
+        
+        # 2. Bulk generate questions (Cost-optimized)
+        raw_json = self.question_gen.generate_bulk_questions(difficulty, concept, count)
+        
+        try:
+            questions = json.loads(raw_json)
+            return {
+                "lesson": lesson,
+                "questions": questions
+            }
+        except Exception as e:
+            # Fallback if JSON parsing fails
+            return {"error": f"Failed to load challenges: {str(e)}"}
 
     def process_submission(self, question, expected, user_sql, attempt_count):
-        # 1. Execute SQL
-        db_res = self.runner.run_query(user_sql)
+        """
+        Optimized: Uses local result-set validation before calling the AI Tutor.
+        """
+        # 1. Fast Path: Local Validation (Free)
+        # Compares user result set vs expected result set in the local database
+        validation = self.runner.validate_locally(user_sql, expected)
         
-        # 2. Check Logic via LangGraph
-        check_res = self.checker.validate(question, expected, user_sql, attempt_count)
-        
-        # 3. Logic for Hint: If they fail more than once, add a hint
+        # 2. Smart Path: AI Feedback (Only if needed)
+        # If the local check fails, we use the TutorAgent to explain WHY
         hint = None
-        if not check_res["is_correct"] and attempt_count >= 1:
-            hint = self.hinter.get_hint(question, expected, user_sql)
-            
+        is_correct = validation["is_correct"]
+        feedback = "Correct! Well done." if is_correct else ""
+        
+        if not is_correct:
+            # Only call the LLM API if the user is wrong to save costs
+            tutor_res = self.tutor_agent.validate_answer(
+                question, 
+                expected, 
+                user_sql, 
+                attempt_count,
+                is_locally_correct=False
+            )
+            feedback = tutor_res["feedback"]
+
         return {
-            "db_result": db_res,
-            "check_result": check_res,
-            "hint": hint
+            "is_correct": is_correct,
+            "db_result": validation["result"],
+            "sql_error": validation["error"],
+            "feedback": feedback,
+            "attempts": attempt_count + 1
         }
