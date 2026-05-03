@@ -1,0 +1,14 @@
+# Core Frameworks
+langchain
+langchain-google-genai
+langgraph
+
+# UI and Data
+streamlit
+pandas
+
+# Environment and Database
+python-dotenv
+
+# Utilities
+pydantic
